@@ -336,6 +336,9 @@ A11Y Engine    ╔════════════════ PARALLEL ═�
 | Performance Engine         | `engines/performance-engine.ts`     | CWV + 6-layer analysis                                 |
 | Privacy Engine             | `engines/privacy-engine.ts`         | Tracker & consent audit                                |
 | Vision Analyzer            | `engines/vision-analyzer.ts`        | GPT-4o image/video analysis                            |
+| Mobile App Analyzer        | `engines/mobile-app-analyzer.ts`    | 3-pass mobile audit: inventory, journey, verifier      |
+| Mobile Rules               | `engines/mobile-rules.ts`           | Measured contrast, touch targets, prices, permissions  |
+| Mobile Regulation Map      | `engines/mobile-regulation-map.ts`  | India / EU / US / app-store references per finding     |
 | Scoring                    | `engines/scoring.ts`                | Weighted deduction model                               |
 | Trust Scoring              | `engines/trust-scoring.ts`          | Unified 4-pillar composite + integrity check           |
 | Report Generator           | `engines/report-generator.ts`       | Structured report assembly                             |
@@ -470,6 +473,8 @@ Upload a screenshot or screen recording. GPT-4o analyses frames for:
 - Urgency/scarcity visual cues
 - Layout shift indicators
 
+**Mobile App audit** (screenshot-based) goes further than image mode. Each screen is first turned into a UI inventory: elements with bounding boxes, roles, checkbox states and every price. Contrast, touch-target size (dp/pt), accept-vs-decline asymmetry, price consistency (total vs pay button, fees revealed late) and permission-prompt sequence are then **measured** from pixels and extracted values, not estimated by the AI. AI judgement findings (confirmshaming, false urgency, forced action and similar) must use a TrustLens rule ID, and each one is checked by an independent verifier pass; findings the verifier doesn't confirm are labelled "Needs review". The **high-assurance** option runs the analysis twice and keeps only stable findings. **Engagement mode** (`MOBILE_AUDIT_MODE=engagement`) allows only client-safe AI providers (Anthropic Claude, the OpenAI API, Azure OpenAI). Screen reader labels, dynamic type, in-app trackers, performance and manifest permissions need a device audit and are listed as not tested.
+
 ---
 
 ## 9. Regulatory Coverage
@@ -540,6 +545,7 @@ Upload a screenshot or screen recording. GPT-4o analyses frames for:
 | 📄 **PDF**     | Upload .pdf             | PDF/UA compliance, tagged content       |
 | 📸 **Image**   | Upload screenshot       | Quick AI visual review, ~70% confidence |
 | 🎥 **Video**   | Upload screen recording | User journey audit, 8 frames analysed   |
+| 📱 **Mobile App** | Up to 20 app screenshots in journey order, or a screen recording | Native Android/iOS app journeys: measured contrast, touch targets and prices + verified AI findings, mapped to India/EU/US regulations |
 
 ---
 
@@ -619,6 +625,10 @@ GitHub (main branch)
 | Variable         | Required        | Purpose                  |
 | ---------------- | --------------- | ------------------------ |
 | `OPENAI_API_KEY` | For AI features | GPT-4o analysis + vision |
+| `ANTHROPIC_API_KEY` | Optional | Claude vision for the Mobile App audit (client-safe) |
+| `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT` | Optional | Azure OpenAI vision for the Mobile App audit (client-safe) |
+| `GEMINI_API_KEY` | Optional | Free-tier Gemini for internal/demo Mobile App audits only |
+| `MOBILE_AUDIT_MODE` | Optional | `engagement` = client-safe providers only for Mobile App audits |
 
 AI features gracefully degrade — audits run fully without the key (rule-based only).
 

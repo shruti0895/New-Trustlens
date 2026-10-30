@@ -5,7 +5,7 @@ import type {
   PillarConfig,
 } from "./trustscore";
 
-export type AuditType = "website" | "portal" | "pdf";
+export type AuditType = "website" | "portal" | "pdf" | "mobile-app";
 export type AuditStatus =
   | "pending"
   | "crawling"
@@ -52,6 +52,34 @@ export interface AuditConfig {
   performanceProblemContext?: import("./performance").PerformanceProblemContext;
   // ── User ID for database association (future auth) ──
   userId?: string;
+  // ── Mobile app audit (screenshot / recording based) ──
+  mobileApp?: {
+    appName: string;
+    platform: "android" | "ios" | "unknown";
+    screens: { label: string; width: number; height: number }[];
+    // ── Audit trail (P2) ──
+    // Report context supplied by the engagement team
+    appVersion?: string;
+    device?: string;
+    captureDate?: string;
+    engagementMode?: boolean;
+    highAssurance?: boolean;
+    deviceWidthDp?: number;
+    aiProviders?: string[];
+    promptVersion?: string;
+    pixelMeasurement?: boolean;
+    degradedModel?: boolean;
+    reportStatus?: "draft" | "ready-for-review" | "final";
+    counts?: {
+      uniqueIssues: number;
+      instances: number;
+      accessibility: number;
+      darkPatterns: number;
+      privacy: number;
+      advisories: number;
+      needsReview: number;
+    };
+  };
 }
 
 export interface PageData {
@@ -97,6 +125,26 @@ export interface AuditResult {
   };
   // ── Site classification from profiler ──
   siteProfile?: string;
+  // ── Mobile app audit: observations that are guidance, not violations ──
+  mobileAdvisories?: {
+    ruleId: string;
+    title: string;
+    component: string;
+    screens: number[];
+    elements: string[];
+    detail: string;
+  }[];
+  // ── Mobile app audit spot-check (auditor confirm / reject) ──
+  mobileReview?: {
+    confirmed: string[];
+    rejected: {
+      id: string;
+      pillar: "accessibility" | "privacy";
+      reason: string;
+      at: string;
+      item: AccessibilityIssue | import("./privacy").PrivacyFinding;
+    }[];
+  };
 }
 
 export type ConfidenceLevel = "high" | "medium" | "low";

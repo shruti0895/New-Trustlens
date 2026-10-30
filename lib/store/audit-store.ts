@@ -260,7 +260,11 @@ export async function getAuditAsync(id: string): Promise<AuditResult | undefined
     if (fs.existsSync(filePath)) {
       const data = fs.readFileSync(filePath, "utf-8");
       const audit = JSON.parse(data) as AuditResult;
-      activeCache.set(id, audit);
+      // Only cache finished audits: in-progress ones are written by another route's
+      // module instance, so a cached copy here would freeze the progress page
+      if (audit.status === "complete" || audit.status === "error") {
+        activeCache.set(id, audit);
+      }
       return audit;
     }
   } catch (err) {

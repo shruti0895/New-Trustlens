@@ -53,6 +53,19 @@ export interface ReportDisplayInfo {
  * when all 4 pillars are enabled, since listing all 4 is unreadable as a label).
  */
 export function getReportDisplayInfo(audit: AuditResult): ReportDisplayInfo {
+  const base = baseReportDisplayInfo(audit);
+  if (audit.config.type !== 'mobile-app') return base;
+  // Screenshot-based mobile audits give an indicative view, never a "Trusted" verdict
+  return {
+    ...base,
+    headline: 'Mobile App Audit Report',
+    reportTitle: 'Mobile App Audit',
+    statusLabel: 'Indicative',
+  };
+}
+
+/** Pillar-based display info (shared by every audit type) */
+function baseReportDisplayInfo(audit: AuditResult): ReportDisplayInfo {
   const pillars: string[] = audit.config.enabledPillars?.length
     ? audit.config.enabledPillars
     : ['accessibility'];
