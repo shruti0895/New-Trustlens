@@ -17,6 +17,7 @@ interface AuditData {
     enabledPillars?: string[];
     scopeMode?: string;
     selectedJourney?: string;
+    mobileApp?: { appName: string; platform: string };
     journeySteps?: {
       id: string;
       label: string;
@@ -769,21 +770,35 @@ export default function AuditResultPage() {
     }
   }, [user, authLoading, router]);
 
+  // True while the TrustLens server can't be reached (e.g. dev server stopped)
+  const [serverUnreachable, setServerUnreachable] = useState(false);
+
   const fetchData = useCallback(async () => {
-    const res = await fetch(`/api/audit/${id}`);
+    let res: Response;
+    try {
+      res = await fetch(`/api/audit/${id}`);
+    } catch {
+      setServerUnreachable(true);
+      return "unreachable";
+    }
+    setServerUnreachable(false);
     if (res.ok) {
       const d = await res.json();
       setData(d);
       return d.status;
     }
-    return "error";
+    // A just-started audit may not be saved yet — keep polling instead of giving up
+    return res.status === 404 ? "not-found" : "error";
   }, [id]);
 
   useEffect(() => {
     fetchData();
+    let notFoundPolls = 0;
     const interval = setInterval(async () => {
       const status = await fetchData();
-      if (status === "complete" || status === "error") clearInterval(interval);
+      if (status === "not-found") notFoundPolls++;
+      // ~30s of 404s means the audit really doesn't exist
+      if (status === "complete" || status === "error" || notFoundPolls > 20) clearInterval(interval);
     }, 1500);
     return () => clearInterval(interval);
   }, [fetchData]);
@@ -923,7 +938,9 @@ export default function AuditResultPage() {
       >
         <div className="spinner" style={{ margin: "0 auto 20px" }} />
         <p style={{ color: "var(--text-secondary)", fontSize: 14 }}>
-          Starting audit…
+          {serverUnreachable
+            ? "Can't reach the TrustLens server. Make sure it is running (npm run dev) — this page will reconnect automatically."
+            : "Starting audit…"}
         </p>
       </div>
     );
@@ -1136,7 +1153,9 @@ export default function AuditResultPage() {
           <p
             style={{ fontSize: 12, color: "var(--text-secondary)", margin: 0 }}
           >
-            {data.progressMessage}
+            {serverUnreachable
+              ? "Can't reach the TrustLens server. Make sure it is running (npm run dev) — this page will reconnect automatically."
+              : data.progressMessage}
           </p>
         </div>
 
@@ -1715,7 +1734,10 @@ export default function AuditResultPage() {
               fontWeight: 400,
             }}
           >
-            {data.config?.url || "PDF Upload"}
+            {data.config?.url ||
+              (data.config?.type === "mobile-app"
+                ? `Mobile App: ${data.config?.mobileApp?.appName || "Unnamed app"}`
+                : "PDF Upload")}
           </p>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>

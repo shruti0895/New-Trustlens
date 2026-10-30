@@ -7,6 +7,7 @@ import type { DarkPatternFinding } from "../types/darkpattern";
 import type { RecommendationItem } from "../types/performance";
 import { CWV_THRESHOLDS } from "../types/performance";
 import { getReportDisplayInfo, formatPageCount } from "./report-helpers";
+import { renderMobileOverview, renderMobileAppendix, splitLegalSummary } from "./pdf-mobile-sections";
 
 // ── KPMG Brand Palette (RGB) ──────────────────────────────────
 const K = {
@@ -259,7 +260,7 @@ function drawDocHeader(
   doc.setTextColor(...K.midGrey); // Standard muted dark grey accent ink
 
   // 2. Left Column Text: Primary Report Metadata Context
-  doc.text("CONFIDENTIAL COMPLAINCE AUDIT", leftMargin, targetY);
+  doc.text("CONFIDENTIAL COMPLIANCE AUDIT", leftMargin, targetY);
 
   // 3. Right Column Text: Dynamic Document Reference Tracker String
   // Positions perfectly right-aligned matching the explicit content margin line boundary
@@ -602,7 +603,7 @@ function sectionHeading(
   doc.setFont("helvetica", "bold");
   doc.setFontSize(20);
   doc.setTextColor(...K.darkGrey);
-  doc.text(`${num}. ${title}`, 20, y);
+  doc.text(num ? `${num}. ${title}` : title, 20, y);
 
   y += 3;
 
@@ -633,8 +634,36 @@ function startSection(
   return sectionHeading(doc, num, title, y);
 }
 
+// Characters outside WinAnsi that Helvetica cannot render in jsPDF
+const PDF_CHAR_MAP: Record<string, string> = {
+  "₹": "Rs ", "≥": ">=", "≤": "<=", "≠": "!=", "→": "->", "←": "<-", "↑": "^", "↓": "v",
+  "✓": "Yes", "✔": "Yes", "✗": "x", "✘": "x", "━": "-", "─": "-", "≈": "~", "×": "x",
+  " ": " ", " ": " ", " ": " ",
+};
+const WIN_ANSI_EXTRA = "€‚ƒ„…†‡ˆ‰Š‹ŒŽ‘’“”•–—˜™š›œžŸ";
+function pdfSafe(t: string | string[] | unknown): string | string[] | unknown {
+  const fix = (s: string) =>
+    s
+      .replace(/[₹≥≤≠→←↑↓✓✔✗✘━─≈×   ]/g, (c) => PDF_CHAR_MAP[c] ?? "")
+      // Drop anything else Helvetica cannot draw (emoji, CJK, symbols)
+      .replace(/[^\u0000-ÿ]/g, (c) => (WIN_ANSI_EXTRA.includes(c) ? c : ""));
+  if (typeof t === "string") return fix(t);
+  if (Array.isArray(t)) return t.map((x) => (typeof x === "string" ? fix(x) : x));
+  return t;
+}
+
 // ── Main Export ───────────────────────────────────────────────
 export async function generatePdf(audit: AuditResult): Promise<Buffer> {
+  // Mobile reports are final (no auditor review step) — older audits stored a draft/review status line
+  if (audit.config.type === "mobile-app" && audit.report?.executiveSummary) {
+    audit = {
+      ...audit,
+      report: {
+        ...audit.report,
+        executiveSummary: audit.report.executiveSummary.replace(/^REVIEW STATUS:.*$/m, "REPORT STATUS: Final."),
+      },
+    };
+  }
   const report = audit.report!;
   const score = audit.score;
   const issues = audit.issues;
@@ -650,7 +679,15 @@ export async function generatePdf(audit: AuditResult): Promise<Buffer> {
     month: "long",
     year: "numeric",
   });
-  const projectName = config.url || "PDF Document";
+  const isMobile = config.type === "mobile-app";
+  const mobile = config.mobileApp;
+  // "first club" → "First Club" when the name was typed all lower-case
+  const mobileAppName = mobile?.appName && mobile.appName === mobile.appName.toLowerCase() ? mobile.appName.replace(/\b[a-z]/g, (ch) => ch.toUpperCase()) : mobile?.appName;
+  const projectName =
+    config.url ||
+    (isMobile
+      ? `${mobileAppName || "Mobile app"} (${mobile?.platform === "ios" ? "iOS" : mobile?.platform === "android" ? "Android" : "mobile"})`
+      : "PDF Document");
   const pw = 297; // A4 Landscape (all pages rendered landscape)
   const ph = 210;
 
@@ -702,6 +739,14 @@ export async function generatePdf(audit: AuditResult): Promise<Buffer> {
       : (iss as any).regulation?.[0] || "—";
 
   const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+  // Built-in Helvetica only covers WinAnsi: ₹ printed as "¹" and "≥" broke whole
+  // lines into letter-spaced text. Map unsupported characters before drawing.
+  const rawText = doc.text.bind(doc);
+  const rawSplit = doc.splitTextToSize.bind(doc);
+  const rawWidth = doc.getTextWidth.bind(doc);
+  (doc as any).text = (t: string | string[], ...rest: any[]) => (rawText as any)(pdfSafe(t), ...rest);
+  (doc as any).splitTextToSize = (t: string, ...rest: any[]) => rawSplit(pdfSafe(t) as string, ...(rest as [any]));
+  (doc as any).getTextWidth = (t: string) => rawWidth(pdfSafe(t) as string);
 
   // ══════════════════════════════════════════════
   // COVER PAGE (standalone — runs before the first addPage)
@@ -721,8 +766,12 @@ export async function generatePdf(audit: AuditResult): Promise<Buffer> {
   const totalFindings = score.totalIssues || 0;
   const dateStr = auditDate || "January 2026";
   const targetUrlString = projectName || "://kpmg.com";
-  const auditType = "Single Page Audit";
-  const sampleNote = "Single-page asset audit · sub-pages not evaluated.";
+  const auditType = isMobile
+    ? `Mobile App Audit · ${audit.pages.length} screens`
+    : "Single Page Audit";
+  const sampleNote = isMobile
+    ? "Screenshot-based review · device-level checks not performed."
+    : "Single-page asset audit · sub-pages not evaluated.";
 
   // Calculate Panel Layout Math Bounds
   const leftPanelWidth = pwCover * 0.42; // Exactly 42% Panel Boundary (124.74mm)
@@ -1137,9 +1186,9 @@ export async function generatePdf(audit: AuditResult): Promise<Buffer> {
             col: [0, 91, 130] as [number, number, number],
           },
           {
-            label: "UNIQUE VIOLATIONS",
-            value: `${combinedUniqueCount}`,
-            sub: "Distinct Issues",
+            label: isMobile ? "UNIQUE ISSUES" : "UNIQUE VIOLATIONS",
+            value: `${isMobile && mobile?.counts ? mobile.counts.uniqueIssues : combinedUniqueCount}`,
+            sub: isMobile && mobile?.counts ? `${mobile.counts.instances} instances` : "Distinct Issues",
             col: [180, 90, 0] as [number, number, number],
           },
           {
@@ -1149,9 +1198,9 @@ export async function generatePdf(audit: AuditResult): Promise<Buffer> {
             col: [200, 35, 35] as [number, number, number],
           },
           {
-            label: "PAGES AUDITED",
+            label: isMobile ? "SCREENS REVIEWED" : "PAGES AUDITED",
             value: `${audit.pages.length}`,
-            sub: perfResultCover?.targetedPagesAudited
+            sub: isMobile ? "Screenshots" : perfResultCover?.targetedPagesAudited
               ? `${perfResultCover.basePagesAudited ?? 0} crawled + ${perfResultCover.targetedPagesAudited} targeted`
               : "Evaluated",
             col: [0, 100, 90] as [number, number, number],
@@ -1287,7 +1336,9 @@ export async function generatePdf(audit: AuditResult): Promise<Buffer> {
     : { critical: "Immediate", high: "High", medium: "Moderate", low: "Low" };
   const breakdownSprintLabel = perfOnly
     ? { critical: "Sprint 1", high: "Sprint 2", medium: "Q3", low: "Q4" }
-    : { critical: "Sprint 1", high: "Sprint 2", medium: "Q2", low: "Today" };
+    : isMobile
+      ? { critical: "Sprint 1", high: "Sprint 1-2", medium: "This quarter", low: "Backlog" }
+      : { critical: "Sprint 1", high: "Sprint 2", medium: "Q2", low: "Today" };
 
   autoTable(doc, {
     startY: y,
@@ -1440,7 +1491,7 @@ export async function generatePdf(audit: AuditResult): Promise<Buffer> {
       doc.text(statusText, cx + cardW / 2, cy + 22, { align: "center" });
     });
     y += Math.ceil(cwvMeta.length / 3) * 30 + 4;
-  } else if (isA11y) {
+  } else if (isA11y && !isMobile) {
     const cats = [
       "perceivable",
       "operable",
@@ -1477,6 +1528,10 @@ export async function generatePdf(audit: AuditResult): Promise<Buffer> {
     });
   }
 
+  // Mobile app audits replace the board briefing / ROI pages with scope,
+  // methodology, regulatory exposure and the screens reviewed
+  if (isMobile) renderMobileOverview(doc, audit, tocEntries);
+  if (!isMobile) {
   // ══════════════════════════════════════════════
   // SECTION 02A: BOARD BRIEFING — STRATEGIC RISK & REGULATORY LIABILITY
   // ══════════════════════════════════════════════
@@ -2206,6 +2261,7 @@ export async function generatePdf(audit: AuditResult): Promise<Buffer> {
       doc.text(wrappedDesc, textX, msY + 20);
     });
   }
+  }
   // ══════════════════════════════════════════════
   // SECTIONS 2-7: ACCESSIBILITY-ONLY SECTIONS
   // ══════════════════════════════════════════════
@@ -2265,11 +2321,11 @@ export async function generatePdf(audit: AuditResult): Promise<Buffer> {
       alternateRowStyles: { fillColor: K.offWhite },
       columnStyles: {
         0: { cellWidth: 18, fontStyle: "bold", halign: "center" },
-        1: { cellWidth: 90 },
+        1: { cellWidth: 84 },
         2: { cellWidth: 22, halign: "center" },
         3: { cellWidth: 18, halign: "center" },
         4: { cellWidth: 25, halign: "center" },
-        5: { cellWidth: 18, halign: "center" },
+        5: { cellWidth: 24, halign: "center" },
         6: { cellWidth: 25 },
         7: { cellWidth: 18, halign: "center" },
       },
@@ -2364,7 +2420,8 @@ export async function generatePdf(audit: AuditResult): Promise<Buffer> {
       doc.setFont("helvetica", "bold");
       doc.setFontSize(9);
       doc.setTextColor(...K.white);
-      doc.text(criterionLabel.substring(0, 60), cardX + 4, y + 10);
+      // Keep the full criterion where it fits; ellipsis only when it would collide with the badge
+      doc.text(criterionLabel.length > 95 ? `${criterionLabel.substring(0, 94)}…` : criterionLabel, cardX + 4, y + 10);
 
       // Instance badge
       if (issue.occurrenceCount > 1) {
@@ -2470,7 +2527,9 @@ export async function generatePdf(audit: AuditResult): Promise<Buffer> {
       doc.setFont("helvetica", "normal");
       doc.setTextColor(...K.lightBlue);
       const metaRef = isA11y
-        ? `${issue.wcagCriterion} ${issue.wcagName} (${issue.wcagLevel})`
+        ? isMobile
+          ? `SC ${issue.wcagCriterion} (Level ${issue.wcagLevel})`
+          : `${issue.wcagCriterion} ${issue.wcagName} (${issue.wcagLevel})`
         : `${(issue as any).ruleId || "--"}`;
       doc.text(metaRef.substring(0, 32), cardX + (isA11y ? 17 : 13), y);
 
@@ -2671,7 +2730,7 @@ export async function generatePdf(audit: AuditResult): Promise<Buffer> {
         }
         const refBoxW = (cardW - 4) / 2;
         const wcagRefText = isA11y
-          ? `WCAG 2.2 SC ${issue.wcagCriterion} (${issue.wcagName}, Level ${issue.wcagLevel}): ${issue.description ? issue.description.substring(0, 200) : "Conformance required as specified."}`
+          ? `WCAG 2.2 SC ${issue.wcagCriterion} (${issue.wcagName}, Level ${issue.wcagLevel}): ${issue.description ? (isMobile ? issue.description : issue.description.substring(0, 200)) : "Conformance required as specified."}`
           : `Rule: ${(issue as any).ruleId || "--"}. ${issue.description ? issue.description.substring(0, 220) : ""}`;
         doc.setFont("helvetica", "normal");
         doc.setFontSize(7);
@@ -2865,7 +2924,9 @@ export async function generatePdf(audit: AuditResult): Promise<Buffer> {
       ],
       body: Object.entries(byTeam)
         .sort((a, b) => b[1].length - a[1].length)
-        .map(([team, tIssues]) => {
+        .map(([team, allIssues]) => {
+          // Mobile counts root causes (one design-system fix), not every instance
+          const tIssues = isMobile ? allIssues.filter((x, k, arr) => arr.findIndex((o) => o.wcagCriterion === x.wcagCriterion && o.title === x.title) === k) : allIssues;
           const c = tIssues.filter((x) => x.severity === "critical").length;
           const h = tIssues.filter((x) => x.severity === "high").length;
           const m = tIssues.filter((x) => x.severity === "medium").length;
@@ -3041,9 +3102,17 @@ export async function generatePdf(audit: AuditResult): Promise<Buffer> {
       if (c === "1.4.3")
         return "1. Contrast >= 4.5:1 (normal) or 3:1 (large)\n2. Verified with analyser";
       if (c === "1.1.1")
-        return '1. All images have descriptive alt text\n2. Decorative images use alt=""';
+        return isMobile
+          ? "1. VoiceOver/TalkBack announce a meaningful name\n2. accessibilityLabel / contentDescription set; decorative images hidden"
+          : '1. All images have descriptive alt text\n2. Decorative images use alt=""';
       if (c === "4.1.2")
-        return "1. SR announces name, role, state\n2. ARIA attributes are valid";
+        return isMobile
+          ? "1. Screen reader announces name, role and state\n2. Native control traits / roles used"
+          : "1. SR announces name, role, state\n2. ARIA attributes are valid";
+      if (isMobile && c === "2.5.8")
+        return "1. Tappable area >= 24x24 (platform target 44pt / 48dp)\n2. Verified on a device";
+      if (isMobile && c === "3.3.2")
+        return "1. Field purpose is clear before and during input\n2. Verified with VoiceOver/TalkBack";
       return `1. Issue no longer reproducible\n2. WCAG ${c} criterion met`;
     };
 
@@ -3073,10 +3142,10 @@ export async function generatePdf(audit: AuditResult): Promise<Buffer> {
       },
       alternateRowStyles: { fillColor: K.offWhite },
       columnStyles: {
-        0: { cellWidth: 12, fontStyle: "bold", halign: "center" },
-        1: { cellWidth: 45 },
-        2: { cellWidth: 18, halign: "center" },
-        3: { cellWidth: 78 },
+        0: { cellWidth: 18, fontStyle: "bold", halign: "center" },
+        1: { cellWidth: 60 },
+        2: { cellWidth: 20, halign: "center" },
+        3: { cellWidth: 110 },
       },
       didParseCell: (data) => {
         if (data.section === "body" && data.column.index === 2) {
@@ -3419,7 +3488,9 @@ export async function generatePdf(audit: AuditResult): Promise<Buffer> {
     doc.setFontSize(9);
     doc.setTextColor(...K.darkGrey);
     doc.text(
-      `${dpFindings.length} dark pattern instance(s) detected — ${dpDeduped.length} unique finding(s) after deduplication.`,
+      isMobile
+        ? `${dpDeduped.length} unique deceptive-design finding(s). Repeated sightings are grouped into one finding listing every affected screen.`
+        : `${dpFindings.length} dark pattern instance(s) detected — ${dpDeduped.length} unique finding(s) after deduplication.`,
       20,
       y,
     );
@@ -3429,25 +3500,42 @@ export async function generatePdf(audit: AuditResult): Promise<Buffer> {
     autoTable(doc, {
       startY: y,
       head: [
-        [
-          "#",
-          "Finding",
-          "Category",
-          "CCPA",
-          "Severity",
-          "DSA Article",
-          "Instances",
-        ],
+        isMobile
+          ? ["#", "Finding", "Category", "Rule", "Severity", "India pattern (CCPA 2023)", "Screens"]
+          : [
+            "#",
+            "Finding",
+            "Category",
+            "CCPA",
+            "Severity",
+            "DSA Article",
+            "Instances",
+          ],
       ],
-      body: dpDeduped.map((f, idx) => [
-        `#${String(idx + 1).padStart(3, "0")}`,
-        f.title,
-        f.category.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
-        f.brignullPattern ? `#${f.brignullNumber} ${f.brignullPattern}` : "—",
-        f.severity.toUpperCase(),
-        f.dsaArticle || f.regulation?.[0] || "—",
-        f._instanceCount > 1 ? `×${f._instanceCount}` : "1",
-      ]),
+      body: dpDeduped.map((f, idx) =>
+        isMobile
+          ? [
+            `#${String(idx + 1).padStart(3, "0")}`,
+            f.title,
+            f.category.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
+            f.ruleId,
+            f.severity.toUpperCase(),
+            (() => {
+              const ref = splitLegalSummary(f.legalSummary).India.find((r) => r.includes("CCPA")) || "";
+              if (/Misleading Advertisements/.test(ref)) return "Misleading advertisement (2022)";
+              return ref.replace(/^India CCPA Dark Pattern Guidelines 2023 — /, "") || "—";
+            })(),
+            [...f.pageUrl.matchAll(/Screen (\d+)/g)].map((m) => m[1]).join(", ") || "—",
+          ]
+          : [
+            `#${String(idx + 1).padStart(3, "0")}`,
+            f.title,
+            f.category.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
+            f.brignullPattern ? `#${f.brignullNumber} ${f.brignullPattern}` : "—",
+            f.severity.toUpperCase(),
+            f.dsaArticle || f.regulation?.[0] || "—",
+            f._instanceCount > 1 ? `×${f._instanceCount}` : "1",
+          ]),
       headStyles: {
         fillColor: [106, 40, 155],
         textColor: K.white,
@@ -3466,10 +3554,10 @@ export async function generatePdf(audit: AuditResult): Promise<Buffer> {
         0: { cellWidth: 15, fontStyle: "bold", halign: "center" },
         1: { cellWidth: 75 },
         2: { cellWidth: 40 },
-        3: { cellWidth: 45 },
+        3: { cellWidth: isMobile ? 32 : 45 },
         4: { cellWidth: 25, halign: "center" },
-        5: { cellWidth: 40 },
-        6: { cellWidth: 17, halign: "center" },
+        5: { cellWidth: isMobile ? 45 : 40 },
+        6: { cellWidth: isMobile ? 25 : 17, halign: "center" },
       },
       didParseCell: (data) => {
         if (data.section === "body" && data.column.index === 4) {
@@ -3550,7 +3638,7 @@ export async function generatePdf(audit: AuditResult): Promise<Buffer> {
       doc.setFont("helvetica", "bold");
       doc.setFontSize(7);
       doc.setTextColor(220, 180, 255);
-      doc.text("CCPA CATEGORIZATION", cardX + 4, y + 4.5);
+      doc.text(isMobile ? "CATEGORY" : "CCPA CATEGORIZATION", cardX + 4, y + 4.5);
       const ccpaLabel = f.brignullPattern
         ? `#${f.brignullNumber} — ${f.brignullPattern}`
         : f.category
@@ -3663,10 +3751,22 @@ export async function generatePdf(audit: AuditResult): Promise<Buffer> {
 
       doc.setFont("helvetica", "bold");
       doc.setTextColor(...K.navy);
-      doc.text("DSA Art: ", cardX + 56, y);
+      doc.text(isMobile ? "Basis: " : "DSA Art: ", cardX + 56, y);
       doc.setFont("helvetica", "normal");
       doc.setTextColor(...K.lightBlue);
-      doc.text(f.dsaArticle || "—", cardX + 74, y);
+      doc.text(
+        isMobile
+          ? f.source === "rule"
+            ? ["contrastRatio", "targetSize", "sumOfItems", "displayedTotal"].some((k) => k in ((f.evidence?.measurements as Record<string, unknown>) || {}))
+              ? "Measured"
+              : "Rule-based check"
+            : f.confidence === "low"
+              ? "AI judgement (lower confidence)"
+              : "AI + verifier"
+          : f.dsaArticle || "—",
+        cardX + 74,
+        y,
+      );
 
       if (f.fixPriority) {
         doc.setFont("helvetica", "bold");
@@ -3690,8 +3790,18 @@ export async function generatePdf(audit: AuditResult): Promise<Buffer> {
 
       // ── REGULATORY REFERENCE BOXES ──
       const regBoxW = (cardW - 4) / 2;
-      const indiaText = `India DPDP Act / BIS Guidelines: Dark patterns that manipulate user consent or obscure choices violate the Digital Personal Data Protection Act, 2023. Organisations must ensure transparent, unambiguous interfaces to obtain valid user consent.`;
-      const europeText = `Europe DSA / GDPR / UCPD: Article ${f.dsaArticle || "25"} of the Digital Services Act prohibits deceptive user-interface design. GDPR Art. 7 requires freely given, unambiguous consent. UCPD bans misleading commercial practices in consumer-facing interfaces.`;
+      // Mobile audits carry finding-specific references (India CCPA 2023 pattern, EU, US, app stores)
+      const legal = isMobile && f.legalSummary ? splitLegalSummary(f.legalSummary) : null;
+      const indiaText = legal
+        ? legal.India.join("; ") || "No India-specific reference identified for this pattern."
+        : `India DPDP Act / BIS Guidelines: Dark patterns that manipulate user consent or obscure choices violate the Digital Personal Data Protection Act, 2023. Organisations must ensure transparent, unambiguous interfaces to obtain valid user consent.`;
+      const europeText = legal
+        ? [
+            legal.EU.length ? `EU: ${legal.EU.join("; ")}` : "",
+            legal.US.length ? `US: ${legal.US.join("; ")}` : "",
+            legal["App stores"].length ? `App stores: ${legal["App stores"].join("; ")}` : "",
+          ].filter(Boolean).join("\n")
+        : `Europe DSA / GDPR / UCPD: Article ${f.dsaArticle || "25"} of the Digital Services Act prohibits deceptive user-interface design. GDPR Art. 7 requires freely given, unambiguous consent. UCPD bans misleading commercial practices in consumer-facing interfaces.`;
 
       doc.setFont("helvetica", "normal");
       doc.setFontSize(7);
@@ -3713,7 +3823,7 @@ export async function generatePdf(audit: AuditResult): Promise<Buffer> {
       doc.setFont("helvetica", "bold");
       doc.setFontSize(7.5);
       doc.setTextColor(180, 80, 0);
-      doc.text("INDIA — DPDP ACT / BIS GUIDELINES", cardX + 4, y + 6);
+      doc.text(legal ? "INDIA — CCPA DARK PATTERN GUIDELINES 2023 / DPDP" : "INDIA — DPDP ACT / BIS GUIDELINES", cardX + 4, y + 6);
       doc.setFont("helvetica", "normal");
       doc.setFontSize(7);
       doc.setTextColor(...K.nearBlack);
@@ -3728,7 +3838,7 @@ export async function generatePdf(audit: AuditResult): Promise<Buffer> {
       doc.setFont("helvetica", "bold");
       doc.setFontSize(7.5);
       doc.setTextColor(30, 60, 160);
-      doc.text("EUROPE — DSA / GDPR / UCPD", euX + 4, y + 6);
+      doc.text(legal ? "EU · US · APP STORE POLICY" : "EUROPE — DSA / GDPR / UCPD", euX + 4, y + 6);
       doc.setFont("helvetica", "normal");
       doc.setFontSize(7);
       doc.setTextColor(...K.nearBlack);
@@ -3803,7 +3913,9 @@ export async function generatePdf(audit: AuditResult): Promise<Buffer> {
       doc.setFontSize(7.5);
       doc.setTextColor(...purple);
       doc.text(
-        "Please refer to the Annexure for supporting evidence and full element details.",
+        isMobile
+          ? "The full screen is shown in Section 1B (Screens Reviewed)."
+          : "Please refer to the Annexure for supporting evidence and full element details.",
         cardX + 4,
         y,
       );
@@ -4458,7 +4570,9 @@ export async function generatePdf(audit: AuditResult): Promise<Buffer> {
       doc.setFontSize(11);
       doc.setTextColor(...K.darkGrey);
       doc.text(
-        `${privFindings.length} finding(s). Score: ${privResult.overallScore ?? "—"}/100. Trackers: ${privResult.totalTrackers ?? 0}. Consent banner: ${privResult.hasConsentBanner ? "Present" : "Missing"}.`,
+        isMobile
+          ? `${privFindings.length} visible privacy-UX finding(s) (permission prompts, consent, data requests). Trackers, SDKs and data flows were not assessed from screenshots.`
+          : `${privFindings.length} finding(s). Score: ${privResult.overallScore ?? "—"}/100. Trackers: ${privResult.totalTrackers ?? 0}. Consent banner: ${privResult.hasConsentBanner ? "Present" : "Missing"}.`,
         20,
         y,
       );
@@ -4556,6 +4670,8 @@ export async function generatePdf(audit: AuditResult): Promise<Buffer> {
       }
     }
   }
+
+  if (isMobile) renderMobileAppendix(doc, audit, tocEntries);
 
   // ── Insert Table of Contents AFTER the cover page ──
   // All body page numbers shift by +1 once the TOC is inserted.

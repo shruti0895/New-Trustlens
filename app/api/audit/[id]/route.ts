@@ -15,6 +15,16 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     return NextResponse.json({ error: 'Audit not found' }, { status: 404 });
   }
 
+  // Mobile app audits run as a background job — if the server restarted mid-run,
+  // the stored audit never finishes. Report it as interrupted instead of spinning forever.
+  if (audit.config.type === 'mobile-app' && audit.status !== 'complete' && audit.status !== 'error') {
+    const lastActivity = audit.testLog?.length ? audit.testLog[audit.testLog.length - 1].timestamp : audit.startedAt;
+    if (Date.now() - new Date(lastActivity).getTime() > 10 * 60 * 1000) {
+      audit.status = 'error';
+      audit.error = 'This mobile app audit was interrupted (the server stopped or restarted while it was running). Please run it again.';
+    }
+  }
+
   if (userId && audit.config.userId && audit.config.userId !== userId) {
     return NextResponse.json({ error: 'Access denied' }, { status: 403 });
   }
@@ -38,6 +48,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     startedAt: audit.startedAt,
     completedAt: audit.completedAt,
     error: audit.error,
+    auditIntegrity: audit.auditIntegrity,
   };
 
   // Only include heavy report/pillar data when audit is complete

@@ -991,7 +991,7 @@ export function analyzePdfDarkPatterns(
  * Mirrors darkpattern-engine's buildResult so PDFs get a consistent
  * DarkPatternResult without touching DOM/visual/journey engines.
  */
-function buildResult(
+export function buildResult(
   findings: DarkPatternFinding[],
   pagesScanned: number,
 ): DarkPatternResult {

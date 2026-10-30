@@ -2105,6 +2105,8 @@ const PREDEFINED_JOURNEYS: PredefinedJourneyTemplate[] = [
     const { user, loading: authLoading } = useAuth();
     const imageRef = useRef<HTMLInputElement>(null);
     const videoRef = useRef<HTMLInputElement>(null);
+    const mobileScreensRef = useRef<HTMLInputElement>(null);
+    const mobileVideoRef = useRef<HTMLInputElement>(null);
 
     // Redirect to sign in if not authenticated
     useEffect(() => {
@@ -2113,7 +2115,7 @@ const PREDEFINED_JOURNEYS: PredefinedJourneyTemplate[] = [
       }
     }, [user, authLoading, router]);
 
-  const [tab, setTab] = useState<"website" | "pdf" | "image" | "video">(
+  const [tab, setTab] = useState<"website" | "pdf" | "image" | "video" | "mobile">(
     "website",
   );
 
@@ -2177,6 +2179,17 @@ const PREDEFINED_JOURNEYS: PredefinedJourneyTemplate[] = [
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [videoProcessing, setVideoProcessing] = useState(false);
+  // ── Mobile app audit (screenshots / screen recording) ──
+  const [mobileAppName, setMobileAppName] = useState("");
+  const [mobilePlatform, setMobilePlatform] = useState<"android" | "ios" | "unknown">("unknown");
+  const [mobileInput, setMobileInput] = useState<"screens" | "recording">("screens");
+  const [mobileScreens, setMobileScreens] = useState<{ file: File; label: string }[]>([]);
+  const [mobileVideo, setMobileVideo] = useState<File | null>(null);
+  const [mobileHighAssurance, setMobileHighAssurance] = useState(false);
+  const [mobileAppVersion, setMobileAppVersion] = useState("");
+  const [mobileDevice, setMobileDevice] = useState("");
+  const [mobileCaptureDate, setMobileCaptureDate] = useState("");
+  const [mobileDeviceWidth, setMobileDeviceWidth] = useState("");
 
   // Scope mode
   const [scopeMode, setScopeMode] = useState<
@@ -2527,6 +2540,103 @@ const PREDEFINED_JOURNEYS: PredefinedJourneyTemplate[] = [
       video.onerror = () =>
         reject(new Error("Failed to load video. Try MP4 or WebM format."));
     });
+  };
+
+  // Load an image source and return it as a downscaled JPEG (keeps original size for touch-target scale)
+  const toMobileScreen = (
+    src: string,
+    label: string,
+  ): Promise<{ base64: string; mimeType: string; label: string; width: number; height: number }> =>
+    new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const scale = Math.min(1, 1600 / Math.max(img.naturalWidth, img.naturalHeight));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.round(img.naturalWidth * scale);
+        canvas.height = Math.round(img.naturalHeight * scale);
+        canvas.getContext("2d")!.drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve({
+          base64: canvas.toDataURL("image/jpeg", 0.85).split(",")[1],
+          mimeType: "image/jpeg",
+          label,
+          width: img.naturalWidth,
+          height: img.naturalHeight,
+        });
+      };
+      img.onerror = () => reject(new Error(`Could not read image "${label}"`));
+      img.src = src;
+    });
+
+  const moveMobileScreen = (index: number, dir: -1 | 1) => {
+    setMobileScreens((list) => {
+      const next = [...list];
+      const target = index + dir;
+      if (target < 0 || target >= next.length) return list;
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
+  };
+
+  const startMobileAudit = async () => {
+    if (mobileInput === "screens" && mobileScreens.length === 0) {
+      setError("Please add at least one app screenshot");
+      return;
+    }
+    if (mobileInput === "recording" && !mobileVideo) {
+      setError("Please select a screen recording");
+      return;
+    }
+    setLoading(true);
+    setError("");
+    try {
+      let screens;
+      if (mobileInput === "screens") {
+        screens = await Promise.all(
+          mobileScreens.map(async (s, i) => {
+            const objUrl = URL.createObjectURL(s.file);
+            try {
+              return await toMobileScreen(objUrl, s.label || `Screen ${i + 1}`);
+            } finally {
+              URL.revokeObjectURL(objUrl);
+            }
+          }),
+        );
+      } else {
+        setVideoProcessing(true);
+        const frames = await extractVideoFrames(mobileVideo!, 8);
+        screens = await Promise.all(
+          frames.map((f) =>
+            toMobileScreen(
+              `data:${f.mimeType};base64,${f.base64}`,
+              `Recording @ ${(f.timestampMs / 1000).toFixed(1)}s`,
+            ),
+          ),
+        );
+      }
+      const res = await fetch("/api/audit/mobile", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          appName: mobileAppName,
+          platform: mobilePlatform,
+          screens,
+          // Privacy UX (consent, permission prompts) is always checked for mobile apps
+          pillars: [...getEnabledPillars(), "privacy"],
+          highAssurance: mobileHighAssurance,
+          deviceWidthDp: Number(mobileDeviceWidth) || undefined,
+          appVersion: mobileAppVersion,
+          device: mobileDevice,
+          captureDate: mobileCaptureDate,
+        }),
+      });
+      const data = await res.json();
+      if (data.auditId) router.push(`/audit/${data.auditId}`);
+      else setError(data.error || "Failed to start mobile app audit");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Mobile app audit failed to start");
+    }
+    setLoading(false);
+    setVideoProcessing(false);
   };
 
   const handleDrop = (e: React.DragEvent) => {
@@ -3140,6 +3250,13 @@ const PREDEFINED_JOURNEYS: PredefinedJourneyTemplate[] = [
           onClick={() => setTab("pdf")}
         >
           PDF Document
+        </button>
+        <button
+          style={{ width: "360px" }}
+          className={`tab ${tab === "mobile" ? "active" : ""}`}
+          onClick={() => setTab("mobile")}
+        >
+          Mobile App
         </button>
         {/* <button
           className={`tab ${tab === "image" ? "active" : ""}`}
@@ -5057,6 +5174,335 @@ const PREDEFINED_JOURNEYS: PredefinedJourneyTemplate[] = [
               </>
             ) : (
               "Analyze PDF "
+            )}
+          </button>
+        </div>
+      )}
+
+      {/* ── MOBILE APP TAB ── */}
+      {tab === "mobile" && (
+        <div className="glass-card animate-fade-in">
+          <div
+            style={{
+              padding: "10px 0 16px",
+              borderBottom: "1px solid var(--border)",
+              marginBottom: 18,
+            }}
+          >
+            <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 6 }}>
+              Mobile App Audit
+            </div>
+            <p style={{ fontSize: 12, color: "var(--text-muted)", margin: 0 }}>
+              Upload the screens of an app journey (Android or iOS) in order, or
+              a screen recording. Each screen is checked for accessibility, dark
+              patterns and privacy UX, then the whole journey is checked for
+              cross-screen issues. Vision AI · ~70% confidence. Performance is
+              not assessed from screenshots.
+            </p>
+          </div>
+
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(2, 1fr)",
+              gap: 10,
+              marginBottom: 16,
+            }}
+          >
+            <div className="input-group">
+              <label className="input-label" htmlFor="mobile-app-name">
+                App Name
+              </label>
+              <input
+                id="mobile-app-name"
+                className="input-field"
+                placeholder="e.g. Acme Banking"
+                value={mobileAppName}
+                onChange={(e) => setMobileAppName(e.target.value)}
+              />
+            </div>
+            <div className="input-group">
+              <label className="input-label" htmlFor="mobile-platform">
+                Platform
+              </label>
+              <select
+                id="mobile-platform"
+                className="input-field"
+                value={mobilePlatform}
+                onChange={(e) =>
+                  setMobilePlatform(e.target.value as "android" | "ios" | "unknown")
+                }
+              >
+                <option value="unknown">Not sure / Both</option>
+                <option value="android">Android</option>
+                <option value="ios">iOS</option>
+              </select>
+            </div>
+            <div className="input-group">
+              <label className="input-label" htmlFor="mobile-app-version">
+                App Version / Build
+              </label>
+              <input
+                id="mobile-app-version"
+                className="input-field"
+                placeholder="e.g. 4.12.0 (812)"
+                value={mobileAppVersion}
+                onChange={(e) => setMobileAppVersion(e.target.value)}
+              />
+            </div>
+            <div className="input-group">
+              <label className="input-label" htmlFor="mobile-device">
+                Device / OS
+              </label>
+              <input
+                id="mobile-device"
+                className="input-field"
+                placeholder="e.g. iPhone 15, iOS 18.2"
+                value={mobileDevice}
+                onChange={(e) => setMobileDevice(e.target.value)}
+              />
+            </div>
+            <div className="input-group">
+              <label className="input-label" htmlFor="mobile-capture-date">
+                Screens Captured On
+              </label>
+              <input
+                id="mobile-capture-date"
+                className="input-field"
+                type="date"
+                value={mobileCaptureDate}
+                onChange={(e) => setMobileCaptureDate(e.target.value)}
+              />
+            </div>
+            <div className="input-group">
+              <label className="input-label" htmlFor="mobile-device-width">
+                Device Width (dp / pt)
+              </label>
+              <input
+                id="mobile-device-width"
+                className="input-field"
+                type="number"
+                min={280}
+                max={1400}
+                placeholder="Auto (Android 411 · iOS 390)"
+                value={mobileDeviceWidth}
+                onChange={(e) => setMobileDeviceWidth(e.target.value)}
+              />
+            </div>
+            <div className="input-group">
+              <label className="input-label">High Assurance</label>
+              <label
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  cursor: "pointer",
+                  padding: "10px 0",
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={mobileHighAssurance}
+                  onChange={(e) => setMobileHighAssurance(e.target.checked)}
+                  style={{
+                    width: 16,
+                    height: 16,
+                    accentColor: "var(--kpmg-dynamic)",
+                  }}
+                />
+                <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>
+                  Run twice, keep only stable findings (slower)
+                </span>
+              </label>
+            </div>
+          </div>
+
+          <div className="tabs" style={{ marginBottom: 16 }}>
+            <button
+              style={{ flex: 1 }}
+              className={`tab ${mobileInput === "screens" ? "active" : ""}`}
+              onClick={() => setMobileInput("screens")}
+            >
+              Screenshots
+            </button>
+            <button
+              style={{ flex: 1 }}
+              className={`tab ${mobileInput === "recording" ? "active" : ""}`}
+              onClick={() => setMobileInput("recording")}
+            >
+              Screen Recording
+            </button>
+          </div>
+
+          {mobileInput === "screens" ? (
+            <>
+              <div
+                className="upload-area"
+                onClick={() => mobileScreensRef.current?.click()}
+              >
+                <input
+                  ref={mobileScreensRef}
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp"
+                  multiple
+                  hidden
+                  onChange={(e) => {
+                    const files = Array.from(e.target.files || []);
+                    setMobileScreens((list) =>
+                      [
+                        ...list,
+                        ...files.map((file) => ({
+                          file,
+                          label: file.name.replace(/\.[^.]+$/, ""),
+                        })),
+                      ].slice(0, 20),
+                    );
+                    setError("");
+                    e.target.value = "";
+                  }}
+                />
+                <div style={{ fontSize: 44, marginBottom: 14 }}>📱</div>
+                <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 4 }}>
+                  Click to add app screenshots
+                </div>
+                <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                  JPEG, PNG, WebP · Up to 20 screens · Add them in journey order
+                </div>
+              </div>
+
+              {mobileScreens.length > 0 && (
+                <div
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 8,
+                    marginTop: 14,
+                  }}
+                >
+                  {mobileScreens.map((s, i) => (
+                    <div
+                      key={`${s.file.name}-${i}`}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 10,
+                        padding: "8px 12px",
+                        borderRadius: "var(--radius-md)",
+                        border: "1px solid var(--border)",
+                      }}
+                    >
+                      <span
+                        style={{
+                          fontSize: 12,
+                          fontWeight: 700,
+                          color: "var(--text-muted)",
+                          minWidth: 22,
+                        }}
+                      >
+                        {i + 1}.
+                      </span>
+                      <input
+                        className="input-field"
+                        aria-label={`Label for screen ${i + 1}`}
+                        value={s.label}
+                        onChange={(e) =>
+                          setMobileScreens((list) =>
+                            list.map((x, j) =>
+                              j === i ? { ...x, label: e.target.value } : x,
+                            ),
+                          )
+                        }
+                      />
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        aria-label={`Move screen ${i + 1} up`}
+                        onClick={() => moveMobileScreen(i, -1)}
+                        disabled={i === 0}
+                      >
+                        ↑
+                      </button>
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        aria-label={`Move screen ${i + 1} down`}
+                        onClick={() => moveMobileScreen(i, 1)}
+                        disabled={i === mobileScreens.length - 1}
+                      >
+                        ↓
+                      </button>
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        aria-label={`Remove screen ${i + 1}`}
+                        onClick={() =>
+                          setMobileScreens((list) => list.filter((_, j) => j !== i))
+                        }
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          ) : (
+            <div
+              className="upload-area"
+              onClick={() => mobileVideoRef.current?.click()}
+            >
+              <input
+                ref={mobileVideoRef}
+                type="file"
+                accept="video/mp4,video/webm,video/mov,video/quicktime"
+                hidden
+                onChange={(e) => {
+                  if (e.target.files?.[0]) {
+                    setMobileVideo(e.target.files[0]);
+                    setError("");
+                  }
+                }}
+              />
+              <div style={{ fontSize: 44, marginBottom: 14 }}>🎥</div>
+              {mobileVideo ? (
+                <div>
+                  <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 4 }}>
+                    {mobileVideo.name}
+                  </div>
+                  <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                    {(mobileVideo.size / 1024 / 1024).toFixed(1)} MB · 8 frames
+                    will be extracted in your browser
+                  </div>
+                </div>
+              ) : (
+                <div>
+                  <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 4 }}>
+                    Click to upload a screen recording of the app
+                  </div>
+                  <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                    Supports MP4, WebM, MOV
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          <button
+            className="btn btn-primary btn-lg"
+            style={{ width: "100%", marginTop: 18 }}
+            onClick={startMobileAudit}
+            disabled={
+              loading ||
+              (mobileInput === "screens" ? mobileScreens.length === 0 : !mobileVideo)
+            }
+          >
+            {loading ? (
+              <>
+                <div
+                  className="spinner"
+                  style={{ width: 18, height: 18, borderWidth: 2 }}
+                />{" "}
+                {videoProcessing ? "Extracting frames..." : "Analysing app..."}
+              </>
+            ) : (
+              "Analyse Mobile App"
             )}
           </button>
         </div>
